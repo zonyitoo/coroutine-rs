@@ -50,6 +50,8 @@ mod thunk; // use self-maintained thunk, because std::thunk is temporary. May be
 mod sys;
 mod environment;
 
+mod native;
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

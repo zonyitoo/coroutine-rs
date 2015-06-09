@@ -19,6 +19,8 @@ use libc;
 
 use sys;
 
+use native::{Registers, swap_registers};
+
 // FIXME #7761: Registers is boxed so that it is 16-byte aligned, for storing
 // SSE regs.  It would be marginally better not to do this. In C++ we
 // use an attribute on a struct.
@@ -28,7 +30,7 @@ use sys;
 #[derive(Debug)]
 pub struct Context {
     /// Hold the registers while the task or scheduler is suspended
-    regs: Box<Registers>,
+    regs: Box<::native::Registers>,
     /// Lower bound and upper bound for the stack
     stack_bounds: Option<(usize, usize)>,
 }
@@ -113,6 +115,7 @@ impl Context {
                 None => sys::stack::record_rust_managed_stack_bounds(0, usize::MAX),
             }
             rust_swap_registers(out_regs, in_regs)
+            // swap_registers(out_regs, in_regs)
         }
     }
 }
@@ -194,43 +197,43 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkpt
     regs.ebp = 0;
 }
 
-// windows requires saving more registers (both general and XMM), so the windows
-// register context must be larger.
-#[cfg(all(windows, target_arch = "x86_64"))]
-#[repr(C)]
-#[derive(Debug)]
-struct Registers {
-    gpr: [libc::uintptr_t; 14],
-    _xmm: [simd::u32x4; 10]
-}
+// // windows requires saving more registers (both general and XMM), so the windows
+// // register context must be larger.
+// #[cfg(all(windows, target_arch = "x86_64"))]
+// #[repr(C)]
+// #[derive(Debug)]
+// struct Registers {
+//     gpr: [libc::uintptr_t; 14],
+//     _xmm: [simd::u32x4; 10]
+// }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
-impl Registers {
-    fn new() -> Registers {
-        Registers {
-            gpr: [0; 14],
-            _xmm: [simd::u32x4(0,0,0,0); 10]
-        }
-    }
-}
+// #[cfg(all(windows, target_arch = "x86_64"))]
+// impl Registers {
+//     fn new() -> Registers {
+//         Registers {
+//             gpr: [0; 14],
+//             _xmm: [simd::u32x4(0,0,0,0); 10]
+//         }
+//     }
+// }
 
-#[cfg(all(not(windows), target_arch = "x86_64"))]
-#[repr(C)]
-#[derive(Debug)]
-struct Registers {
-    gpr: [libc::uintptr_t; 10],
-    _xmm: [simd::u32x4; 6]
-}
+// #[cfg(all(not(windows), target_arch = "x86_64"))]
+// #[repr(C)]
+// #[derive(Debug)]
+// struct Registers {
+//     gpr: [libc::uintptr_t; 10],
+//     _xmm: [simd::u32x4; 6]
+// }
 
-#[cfg(all(not(windows), target_arch = "x86_64"))]
-impl Registers {
-    fn new() -> Registers {
-        Registers {
-            gpr: [0; 10],
-            _xmm: [simd::u32x4(0,0,0,0); 6]
-        }
-    }
-}
+// #[cfg(all(not(windows), target_arch = "x86_64"))]
+// impl Registers {
+//     fn new() -> Registers {
+//         Registers {
+//             gpr: [0; 10],
+//             _xmm: [simd::u32x4(0,0,0,0); 6]
+//         }
+//     }
+// }
 
 #[cfg(target_arch = "x86_64")]
 fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkptr: *mut (), sp: *mut usize) {
