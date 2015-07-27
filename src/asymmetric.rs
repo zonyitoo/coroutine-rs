@@ -27,6 +27,7 @@ use std::default::Default;
 use std::ops::Deref;
 use std::fmt;
 use std::rt::unwind::try;
+use std::marker::PhantomData;
 
 use context::Context;
 use stack::{Stack, StackPool};
@@ -42,10 +43,12 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut ()) -> ! {
     loop {}
 }
 
-type Handle<T = ()> = Box<CoroutineImpl<T>>;
+type Handle<F, T> = Box<CoroutineImpl<F, T>>;
 
 #[derive(Debug)]
-struct CoroutineImpl<T: Send + 'static = ()> {
+struct CoroutineImpl<F, T=()>
+    where T: Send
+{
     parent: Context,
     context: Context,
     stack: Option<Stack>,
@@ -53,11 +56,16 @@ struct CoroutineImpl<T: Send + 'static = ()> {
     name: Option<String>,
 
     result: Option<::Result<Option<T>>>,
+
+    _func: PhantomData<F>,
 }
 
-unsafe impl<T: Send + 'static> Send for CoroutineImpl<T> {}
+unsafe impl<'a, F, T> Send for CoroutineImpl<F, T>
+    where F: FnOnce(CoroutineRef<F, T>) + Send + 'a,
+          T: Send + 'a
+{}
 
-impl<T: Send + 'static> fmt::Display for CoroutineImpl<T> {
+impl<F, T: Send> fmt::Display for CoroutineImpl<F, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Coroutine({})", self.name.as_ref()
                                             .map(|s| &s[..])
@@ -65,7 +73,9 @@ impl<T: Send + 'static> fmt::Display for CoroutineImpl<T> {
     }
 }
 
-impl<T: Send + 'static> CoroutineImpl<T> {
+impl<F, T=()> CoroutineImpl<F, T>
+    where T: Send
+{
     unsafe fn yield_now(&mut self) -> Option<T> {
         Context::swap(&mut self.context, &self.parent);
         match self.result.take() {
@@ -107,7 +117,7 @@ impl<T: Send + 'static> CoroutineImpl<T> {
     }
 }
 
-impl<T: Send + 'static> Drop for CoroutineImpl<T> {
+impl<F, T: Send> Drop for CoroutineImpl<F, T> {
     fn drop(&mut self) {
         STACK_POOL.with(|pool| unsafe {
             if let Some(stack) = self.stack.take() {
@@ -117,21 +127,24 @@ impl<T: Send + 'static> Drop for CoroutineImpl<T> {
     }
 }
 
-pub struct Coroutine<T: Send + 'static> {
-    coro: UnsafeCell<Handle<T>>,
+pub struct Coroutine<F, T=()>
+    where T: Send
+{
+    coro: UnsafeCell<Handle<F, T>>,
 }
 
-impl<T: Send + 'static> fmt::Debug for Coroutine<T> {
+impl<F, T: Send> fmt::Debug for Coroutine<F, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self.coro.get())
     }
 }
 
-impl<T: Send + 'static> Coroutine<T> {
+impl<'a, F, T=()> Coroutine<F, T>
+    where F: FnMut(CoroutineRef<F, T>) + Send + 'a,
+          T: Send
+{
     #[inline]
-    pub fn spawn_opts<'a, F>(mut f: F, opts: Options) -> Coroutine<T>
-        where F: FnMut(CoroutineRef<T>) + Send + 'a
-    {
+    pub fn spawn_opts(mut f: F, opts: Options) -> Coroutine<F, T> {
         let mut stack = STACK_POOL.with(|pool| unsafe {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
@@ -142,10 +155,11 @@ impl<T: Send + 'static> Coroutine<T> {
             stack: None,
             name: opts.name,
             result: None,
+            _func: PhantomData,
         });
 
-        let coro_ref: &mut CoroutineImpl<T> = unsafe {
-            let ptr: *mut CoroutineImpl<T> = transmute(coro.deref());
+        let coro_ref: &mut CoroutineImpl<F, T> = unsafe {
+            let ptr: *mut CoroutineImpl<F, T> = transmute(coro.deref());
             &mut *ptr
         };
 
@@ -203,12 +217,14 @@ impl<T: Send + 'static> Coroutine<T> {
     }
 
     #[inline]
-    pub fn spawn<'a, F>(f: F) -> Coroutine<T>
-        where F: FnMut(CoroutineRef<T>) + Send + 'a
-    {
+    pub fn spawn(f: F) -> Coroutine<F, T> {
         Coroutine::spawn_opts(f, Default::default())
     }
+}
 
+impl<F, T=()> Coroutine<F, T>
+    where T: Send
+{
     #[inline]
     pub fn name(&self) -> Option<&str> {
         unsafe {
@@ -231,17 +247,24 @@ impl<T: Send + 'static> Coroutine<T> {
     }
 }
 
-pub struct CoroutineRef<T: Send + 'static> {
-    coro: *mut CoroutineImpl<T>,
+pub struct CoroutineRef<F, T=()>
+    where T: Send
+{
+    coro: *mut CoroutineImpl<F, T>,
 }
 
-unsafe impl<T: Send + 'static> Send for CoroutineRef<T> {}
+unsafe impl<'a, F, T=()> Send for CoroutineRef<F, T>
+    where F: FnOnce(CoroutineRef<F, T>) + Send + 'a,
+          T: Send
+{}
 
-impl<T: Send + 'static> CoroutineRef<T> {
+impl<F, T=()> CoroutineRef<F, T>
+    where T: Send
+{
     #[inline]
     pub fn yield_now(&self) -> Option<T> {
         unsafe {
-            let coro: &mut CoroutineImpl<T> = transmute(self.coro);
+            let coro: &mut CoroutineImpl<F, T> = transmute(self.coro);
             coro.yield_now()
         }
     }
@@ -249,7 +272,7 @@ impl<T: Send + 'static> CoroutineRef<T> {
     #[inline]
     pub fn yield_with(&self, data: T) -> Option<T> {
         unsafe {
-            let coro: &mut CoroutineImpl<T> = transmute(self.coro);
+            let coro: &mut CoroutineImpl<F, T> = transmute(self.coro);
             coro.yield_with(data)
         }
     }
@@ -264,13 +287,15 @@ impl<T: Send + 'static> CoroutineRef<T> {
     #[inline]
     pub fn take_data(&self) -> Option<T> {
         unsafe {
-            let coro: &mut CoroutineImpl<T> = transmute(self.coro);
+            let coro: &mut CoroutineImpl<F, T> = transmute(self.coro);
             coro.take_data()
         }
     }
 }
 
-impl<T: Send + 'static> Iterator for Coroutine<T> {
+impl<F, T=()> Iterator for Coroutine<F, T>
+    where T: Send
+{
     type Item = ::Result<T>;
 
     fn next(&mut self) -> Option<::Result<T>> {
@@ -313,7 +338,7 @@ mod test {
 
     #[test]
     fn test_panic_inside() {
-        let will_panic: Coroutine<()> = Coroutine::spawn(|_| {
+        let will_panic: Coroutine<_, ()> = Coroutine::spawn(|_| {
             panic!("Panic inside");
         });
 
@@ -355,15 +380,17 @@ mod test {
     fn test_coroutine_mut() {
         let mut outer = 0;
 
-        let coro = Coroutine::spawn(|me| {
-            loop {
-                outer += 1;
-                me.yield_with(outer);
-            }
-        });
+        {
+            let coro = Coroutine::spawn(|me| {
+                loop {
+                    outer += 1;
+                    me.yield_with(outer);
+                }
+            });
 
-        for _ in 0..10 {
-            coro.resume().unwrap();
+            for _ in 0..10 {
+                coro.resume().unwrap();
+            }
         }
 
         assert_eq!(outer, 10);
@@ -379,13 +406,13 @@ mod benchmark {
     #[bench]
     fn bench_coroutine_spawn(b: &mut Bencher) {
         b.iter(|| {
-            let _: Coroutine<()> = Coroutine::spawn(move|_| {});
+            let _: Coroutine<_, ()> = Coroutine::spawn(move|_| {});
         });
     }
 
     #[bench]
     fn bench_context_switch(b: &mut Bencher) {
-        let coro: Coroutine<()> = Coroutine::spawn(move|me| { me.yield_now(); });
+        let coro: Coroutine<_, ()> = Coroutine::spawn(move|me| { me.yield_now(); });
 
         b.iter(|| coro.resume());
     }
